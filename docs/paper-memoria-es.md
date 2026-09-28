@@ -20,13 +20,13 @@ keywords_en: "agent harness, memory hierarchy, token economics, selective forget
 
 ## Resumen
 
-Los arneses de agentes de producción separan la memoria en dos capas: un archivo inyectado en cada turno (en adelante **core**, del arnés Hermes: `MEMORY.md` y `USER.md`) y un almacén externo de hechos recuperados por consulta (**archival**, en este caso un store holográfico). Este trabajo documenta un estudio de caso sobre el **criterio de reparto** entre ambas capas, y sostiene una tesis operativa: el problema no está en que existan dos capas, sino en **dejar a la deriva qué entra en cada una**. Medido sobre un sistema en producción real (1.759 sesiones, 66.559 mensajes, 256 hechos), encontramos tres fallos que se componen: (a) el 54 % de los hechos del almacén externo superan los 600 caracteres y funcionan como documentos, no como hechos; (b) el mecanismo de recuperación por consulta producía ~11 KB por corrida de los cuales **se descartaba el 91 %**, por un tope de previsualización que el propio agente no percibía; y (c) el mecanismo de peso del almacén (`trust_score`, decaimiento temporal) existía en el código pero estaba **plano o apagado**, de modo que la capa que debía auto-depurarse no se depuraba. La literatura de 2026 es consistente con el diagnóstico: un store sin compuerta de escritura cae de 97,8 % a 13,3 % de precisión con 80 % de distractores (Zahn & Chana, 2603.15994); la construcción domina el ciclo de vida y todos los sistemas evaluados acumulan estado de forma monotónica por defecto (2606.06448); y la elección entre memoria por hechos y contexto largo es una **decisión de costo, no de capacidad** (Pollertlam et al., 2603.04814). El aporte de este trabajo es el criterio de reparto explícito —tres preguntas de decisión— y la medición honesta de un sistema donde el mecanismo formal era correcto y el uso lo había desbordado.
+Los arneses de agentes de producción separan la memoria en dos capas: un archivo inyectado en cada turno (en adelante **core**, del arnés Hermes: `MEMORY.md` y `USER.md`) y un almacén externo de hechos recuperados por consulta (**archival**, en este caso un store holográfico). Este trabajo documenta un estudio de caso sobre el **criterio de reparto** entre ambas capas, y sostiene una tesis operativa: el problema no está en que existan dos capas, sino en **dejar a la deriva qué entra en cada una**. Medido sobre un sistema en producción real (1.759 sesiones, 66.559 mensajes, 256 hechos), encontramos tres fallos que se componen: (a) el 54 % de los hechos del almacén externo superan los 600 caracteres y funcionan como documentos, no como hechos; (b) el mecanismo de recuperación por consulta producía ~11 KB por corrida de los cuales **se descartaba el 91 %**, por un tope de previsualización que el propio agente no percibía; y (c) el mecanismo de peso del almacén (`trust_score`, decaimiento temporal) existía en el código pero estaba **plano o apagado**, de modo que la capa que debía auto-depurarse no se depuraba. La literatura de 2026 es consistente con el diagnóstico: un store sin compuerta de escritura cae de 97,8 % a 13,3 % de precisión con 80 % de distractores (Zahn & Chana, 2603.15994); la construcción domina el ciclo de vida y todos los sistemas evaluados acumulan estado de forma monotónica por defecto (2606.06448); y la elección entre memoria por hechos y contexto largo es una **decisión de costo, no de capacidad** (Pollertlam et al., 2603.04814) — resultado que este trabajo no contradice sino que usa para fundar el reparto: el contenido extenso merece **su propia fuente consultable** (el wiki curado y el corpus de investigación), no un prefijo permanente. El aporte de este trabajo es el criterio de reparto explícito —tres preguntas de decisión—, la formalización de los **cuatro destinos** de la memoria (§3.1) y la medición honesta de un sistema donde el mecanismo formal era correcto y el uso lo había desbordado.
 
 **Palabras clave:** arnés de agente, jerarquía de memoria, economía de tokens, olvido selectivo, criterio de asignación.
 
 ## Abstract
 
-Production agent harnesses split memory across two layers: a file injected on every turn (the **core**: `MEMORY.md`, `USER.md`) and an external store retrieved on demand (the **archival** layer, here a holographic fact store). This paper documents a case study of the **assignment criterion** between both layers, arguing that the defect is not the existence of two layers but **leaving what goes into each one ungoverned**. Measured on a live system (1,759 sessions, 66,559 messages, 256 facts), three compounding failures appear: (a) 54 % of stored facts exceed 600 characters and behave as documents rather than facts; (b) the query-time retrieval path produced ~11 KB per run of which **91 % was discarded**, due to a preview cap the agent itself never noticed; and (c) the store's own weighting machinery (`trust_score`, temporal decay) existed in code but was **flat or disabled**, so the layer meant to self-prune did not prune. The 2026 literature agrees: an ungated store drops from 97.8 % to 13.3 % accuracy with 80 % distractors (Zahn & Chana, 2603.15994); construction dominates the lifecycle and every evaluated system accumulates state monotonically by default (2606.06448); and fact-based memory vs. long context is a **cost decision, not a capability decision** (Pollertlam et al., 2603.04814). The contribution is the explicit assignment criterion — three decision questions — plus an honest measurement of a system where the formal mechanism was sound and its usage had overrun it.
+Production agent harnesses split memory across two layers: a file injected on every turn (the **core**: `MEMORY.md`, `USER.md`) and an external store retrieved on demand (the **archival** layer, here a holographic fact store). This paper documents a case study of the **assignment criterion** between both layers, arguing that the defect is not the existence of two layers but **leaving what goes into each one ungoverned**. Measured on a live system (1,759 sessions, 66,559 messages, 256 facts), three compounding failures appear: (a) 54 % of stored facts exceed 600 characters and behave as documents rather than facts; (b) the query-time retrieval path produced ~11 KB per run of which **91 % was discarded**, due to a preview cap the agent itself never noticed; and (c) the store's own weighting machinery (`trust_score`, temporal decay) existed in code but was **flat or disabled**, so the layer meant to self-prune did not prune. The 2026 literature agrees: an ungated store drops from 97.8 % to 13.3 % accuracy with 80 % distractors (Zahn & Chana, 2603.15994); construction dominates the lifecycle and every evaluated system accumulates state monotonically by default (2606.06448); and fact-based memory vs. long context is a **cost decision, not a capability decision** (Pollertlam et al., 2603.04814) — a finding this work does not contradict but uses to ground the split: extensive content deserves **its own queryable source** (the curated wiki and the research corpus), not a permanent prefix. The contribution is the explicit assignment criterion — three decision questions — the formalization of the **four destinations** of memory (§3.1), and an honest measurement of a system where the formal mechanism was sound and its usage had overrun it.
 
 **Keywords:** agent harness, memory hierarchy, token economics, selective forgetting, assignment criterion, case study.
 
@@ -56,7 +56,7 @@ Este trabajo aporta:
 2. **La medición de un sistema real** (§5) donde los tres fallos —tamaño de los hechos, tope silencioso en la entrega, pesos apagados— se componen, con los números crudos y el método para reproducirlos.
 3. **La contrastación con la literatura de 2026** (§2), que converge con el diagnóstico empírico del autor, y los puntos donde la evidencia contradice la intuición del caso.
 
-**Alcance y límites declarados desde el inicio.** Es un estudio de caso único (*n* = 1 sistema), no un experimento controlado. Las cifras son mediciones del sistema estudiado, no estimaciones de efecto. Las afirmaciones conductuales —si el criterio mejora la conducta del agente— quedan **NO DETERMINABLES** con los datos disponibles, y se declaran como tales en §6.5. Este trabajo no sostiene que la memoria por hechos sea superior al contexto largo: §2.4 muestra que la comparación publicada favorece al contexto largo en precisión y que la ventaja de la memoria es de costo a partir de un punto de equilibrio.
+**Alcance y límites declarados desde el inicio.** Es un estudio de caso único (*n* = 1 sistema), no un experimento controlado. Las cifras son mediciones del sistema estudiado, no estimaciones de efecto. Las afirmaciones conductuales —si el criterio mejora la conducta del agente— quedan **NO DETERMINABLES** con los datos disponibles, y se declaran como tales en §6.5. Este trabajo **no** sostiene que la memoria por hechos sea superior al contexto largo, y no necesita hacerlo: la comparación publicada favorece al contexto largo en precisión (§2.4), y ese resultado es coherente con el diseño medido — el contenido extenso vive en fuentes de **contexto largo dedicadas** (el wiki curado y el corpus de investigación), invocadas por consulta. La tesis que se sostiene es más simple y más fuerte: **ninguna fuente debe invocarse siempre y para todo**, y la única capa que se paga en cada turno debe ser mínima.
 
 ### 1.5 Organización
 
@@ -101,7 +101,18 @@ Pollertlam et al. (**2603.04814**, 5-mar-2026) comparan pasar el historial compl
 
 El trabajo de Dadhich (**2607.21503**, 23-jul-2026) refuerza el marco: plantea el problema como **de ciclo de vida y de arquitectura**, y señala que el contexto de adición completa crece **cuadráticamente** con la longitud de la conversación, mientras la summarización cruda da costo lineal a expensas de precisión.
 
-**Consecuencia para la tesis de este trabajo:** la razón para tener dos capas **no es que la capa de hechos sea más precisa** —no lo es—, sino que (a) el costo de lo que se inyecta siempre crece de forma insostenible, y (b) solo una capa externa permite **política de olvido**, que es lo que la evidencia señala como condición de estabilidad a largo horizonte. La tesis del autor se sostiene sobre el segundo argumento, no sobre el primero, y este trabajo lo declara explícitamente para no atribuirle a la memoria una ventaja de precisión que la literatura no respalda.
+**Consecuencia para la tesis de este trabajo: este resultado no la contradice, la confirma.**
+
+El autor no sostiene que la memoria por hechos sea más precisa que el contexto largo. Sostiene algo distinto y compatible con la evidencia: que **el contenido extenso no debe invocarse siempre y para todo, sino solo cuando se requiere**. En el sistema estudiado eso se materializa en una arquitectura de cuatro destinos, no dos (§3.1): el contenido largo y curado vive en fuentes dedicadas —el **wiki** consolidado y el **corpus de investigación**—, cada una invocada por consulta; el almacén de hechos cubre lo específico y caducable; y solo el residuo sin tema propio ni caducidad ocupa la capa que se paga en cada turno.
+
+Visto así, la ventaja de precisión del contexto largo (33-35 pp en dos de tres pruebas) **no es un argumento contra la memoria por hechos: es la razón por la que el contexto largo merece su propia fuente**. Si el historial completo es más preciso, la conclusión correcta no es «inyectemos el historial», sino «**tengámoslo disponible y traigámoslo cuando el tema lo requiera**». Eso es lo que el wiki curado hace mejor que el historial crudo: está consolidado, es navegable por índice y no se paga por turno.
+
+Los dos argumentos que sostienen la tesis del autor son entonces:
+
+1. **Costo:** lo que se inyecta siempre crece de forma insostenible (§2.4), y el presupuesto de atención es finito y medido en reglas, no solo en tokens (§2.5).
+2. **Olvido:** solo una capa externa permite política de olvido, que la evidencia señala como condición de estabilidad a largo horizonte (§2.3).
+
+La precisión no es un eje de la tesis, y este trabajo no la invoca como tal.
 
 ### 2.5 Por qué el reparto importa: el costo de lo que se paga siempre
 
@@ -117,17 +128,32 @@ Este trabajo no llena ese hueco con un experimento, sino con un criterio explíc
 
 ## 3. Contexto del arnés
 
-### 3.1 El arnés y las dos capas
+### 3.1 El arnés y sus cuatro destinos
 
-El sistema estudiado es un agente personal en producción sobre el arnés Hermes. La memoria tiene dos capas activas simultáneamente:
+El sistema estudiado es un agente personal en producción sobre el arnés Hermes. La pregunta «¿dónde va este dato?» tiene **cuatro** respuestas posibles, no dos, y la distinción es el núcleo del reparto:
 
-| | **Core** (contexto) | **Archival** (almacén externo) |
-|---|---|---|
-| Artefacto | `MEMORY.md` (2.200 caracteres) y `USER.md` (1.375) | `memory_store.db`, tabla `facts` |
-| Acceso | Inyectado en **cada turno**, congelado al inicio de sesión | Recuperado **por consulta** |
-| Costo | Se paga siempre (~1.300 tokens por sesión) | Se paga al recuperar |
-| Límite | Duro, con rechazo explícito al desbordar | Sin tope práctico |
-| Depuración | **Ninguna automática**: el agente debe consolidar a mano | Pesos de confianza + decaimiento temporal |
+| Destino | Artefacto | Acceso | Costo | Depuración |
+|---|---|---|---|---|
+| **Core** | `MEMORY.md` (2.200 car.) y `USER.md` (1.375) | Inyectado en **cada turno**, congelado al inicio de sesión | Se paga siempre (~1.300 tokens por sesión) | **Ninguna automática**: consolidación a mano |
+| **Archival** | `memory_store.db`, tabla `facts` | Recuperado **por consulta** | Se paga al recuperar | Pesos de confianza + decaimiento temporal |
+| **Wiki curado** | `~/wiki` — metacapa, *content types* y evidencia cruda | Por **índice y consulta**: se lee `index.md` y se navega a la página | Se paga al consultar | Reingesta y recompilación por proceso |
+| **Corpus de investigación** | `~/Research` — informes por ciclo y por tema | Por **tema y consulta** | Se paga al consultar | Versionado por ciclo; el ciclo siguiente revisa el anterior |
+
+Los cuatro destinos se ordenan por **una sola variable: con qué frecuencia hace falta el contenido**.
+
+```
+se paga en cada turno    CORE            ← sin tema propio, sin caducidad
+                         │
+se invoca por tema       ARCHIVAL        ← específico, caducable
+                         │
+se invoca por consulta   WIKI CURADO     ← extenso, consolidado, navegable
+                         │
+se invoca por tema       RESEARCH        ← extenso, por ciclo de investigación
+```
+
+**Por qué el wiki y el corpus son destinos propios y no «contexto largo» genérico.** El resultado de 2603.04814 (§2.4) —el contexto largo es más preciso que la memoria por hechos— **no implica inyectar el historial**. Implica que existe un lugar para el contenido extenso, y que su forma importa: el wiki está **consolidado** (páginas compiladas por proceso, con índice como punto de entrada y trazabilidad a la evidencia cruda en `raw/`), mientras el corpus de investigación está **versionado por ciclo**, con cada ciclo revisando el anterior. Ambos son navegables sin recorrerlos enteros, y ninguno se paga por turno. Esa es la forma correcta de tener «contexto largo» disponible: **como fuente consultable, no como prefijo permanente**.
+
+**La consecuencia que el reparto busca:** la única capa que se paga siempre debe quedar reducida al residuo que **no tiene tema propio y no caduca**. Todo lo demás tiene un destino donde se invoca cuando se requiere.
 
 Ambas capas escriben como **afirmaciones sobre el mundo**, nunca como órdenes. La razón no es estilística: una entrada imperativa en el core se relee en cada sesión como una directiva vigente y puede **sobrescribir la intención actual del operador**. Se trata de una regla de seguridad, no de estilo.
 
@@ -328,7 +354,9 @@ Hay tres razones, y conviene separarlas porque la literatura respalda la tercera
 2. **El presupuesto de atención es finito y se mide en reglas, no en tokens.** El cumplimiento decae pasadas 5-6 restricciones simultáneas, y la acumulación es multiplicativa (§2.5). Agregar entradas al core no solo cuesta: **degrada el cumplimiento de las que ya están**.
 3. **Sin capa externa no hay política de olvido.** Y la evidencia indica que sin olvido el rendimiento **degrada**: interferencia de asociaciones viejas, acumulación de contradicciones y propagación de memorias falsas (§2.3). Solo una capa externa puede tener decaimiento, invalidación y poda.
 
-La razón que **no** aplica: la capa de hechos **no es más precisa** que el contexto largo. La comparación publicada favorece al contexto largo en precisión (§2.4), y la ventaja de la memoria es de costo a partir de un punto de equilibrio. Cualquier trabajo que atribuya superioridad de precisión a la memoria por hechos está contradiciendo la evidencia disponible.
+La razón que **no** aplica —y conviene declararlo para no atribuirle a la tesis un argumento que no tiene—: **la capa de hechos no es más precisa que el contexto largo**. La comparación publicada favorece al contexto largo en precisión (§2.4). La tesis de este trabajo no depende de ese eje: el argumento es que **cada fuente se invoca cuando se requiere**, no que una sea más certera que otra. El contenido largo y curado tiene su propio destino (el wiki y el corpus de investigación, §3.1) y se consulta por tema; la memoria por hechos cubre lo específico y caducable; y la capa residente queda reducida al residuo sin tema ni caducidad.
+
+Dicho de otro modo: si el contexto largo fuera la única fuente, la consecuencia del resultado de 2603.04814 sería inyectarlo siempre —que es precisamente lo que la evidencia de costo y de densidad de restricciones prohíbe.
 
 ### 6.3 Por qué el olvido se delega al almacén externo
 
