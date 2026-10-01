@@ -184,13 +184,51 @@ Cada uno con su JSON de detalle (qué se conservó, qué se borró, por qué).
 
 - **La detección de contradicciones son 8 pares construidos**, no una muestra.
   El umbral 0.7 se apoya en esa separación; con más casos podría moverse.
-- **`retrieval_count` sigue sin alimentarse.** La capa de uso no se captura, así
-  que el ranking no puede subir por uso ni bajar por desuso. **Es la pieza que
-  falta, y es la que habría evitado que se borraran los hechos más usados.**
 - **`half_life` sigue en 0.** El decay está implementado y probado (nunca descarta,
   solo baja el score), pero apagado.
 - **El backlog es grande**: 5.000+ candidatos históricos. El cron drena 120 por
   corrida cada 3 h.
 - **No se sabe por qué se borraron los 256 hechos.** Sin tabla de auditoría, no
-  hay forma de reconstruir la causa. El `retrieval_count` en 0 significa que
-  **nadie podía saber cuál era el más usado al momento de borrarlo**.
+  hay forma de reconstruir la causa.
+
+## `retrieval_count`: cerrado como NO VIABLE (decisión, no deuda)
+
+Se investigó alimentarlo desde el historial y **se descartó con evidencia**. Queda
+registrado para que no se reintente sin motivo.
+
+**El dato SÍ era derivable.** El `prefetch` escribe cada turno un bloque
+`## Holographic Memory` con hasta 5 líneas `- [trust] contenido`, y el contenido va
+**literal** (sin transformar); ese bloque queda en `state.db` → `messages.api_content`.
+Contar líneas y mapear por texto exacto da las recuperaciones reales: **27.413 líneas
+en 5.932 bloques**, sin tocar el core ni heredar `prefetch`.
+
+**Por qué se descartó — la fórmula lo ignora.** Verificado en el árbol completo de
+Hermes: `retrieval_count` aparece **3 veces**, todas inertes — dos SELECT que lo traen
+al dict y el DDL que lo declara. **Cero usos en cálculos.** El ranking real
+(`retrieval.py:69`) es:
+
+```python
+fact["score"] = relevance * fact["trust_score"]
+```
+
+No hay aritmética sobre el campo, ni `ORDER BY` que lo use, ni un test que lo toque.
+El historial de git lo confirma: ningún commit lo incrementó jamás (`git log -S`
+devuelve solo un refactor de despacho y un merge). **No es una regresión: es una
+función declarada en el esquema y nunca implementada** — el propio
+`paper-memoria-es.md` §5.4 ya lo documentaba.
+
+**Reversión aplicada.** Se escribieron 13 conteos (10 hechos) y se revirtieron a 0.
+Un contador que afirma un uso que nadie consume es un dato **falso**, no incompleto:
+0 es el estado honesto. Ningún hecho se tocó.
+
+**Regla que queda:** no se alimenta un campo que ningún consumidor lee. Si algún día
+se quiere pesar el uso, **primero** el scoring tiene que usarlo — y eso exige
+reemplazar el provider `holographic` bundled (`HERMES_ENABLE_PROJECT_PLUGINS` +
+drop-in systemd, no `HERMES_BUNDLED_PLUGINS`, que reemplaza en vez de sumar y tumbó
+Telegram 9 h 25 min). **Sin consumidor, el cron no se construye.**
+
+**El valor real extraído** no fue el contador sino el uso histórico como criterio
+de peso: **265 hechos borrados con su número de recuperaciones** (los top: 1.876x,
+1.626x, 992x, 635x — los cuatro, borrados). Eso es lo que sirve para decidir qué
+reingresar.
+
