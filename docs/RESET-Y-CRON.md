@@ -227,8 +227,32 @@ reemplazar el provider `holographic` bundled (`HERMES_ENABLE_PROJECT_PLUGINS` +
 drop-in systemd, no `HERMES_BUNDLED_PLUGINS`, que reemplaza en vez de sumar y tumbó
 Telegram 9 h 25 min). **Sin consumidor, el cron no se construye.**
 
-**El valor real extraído** no fue el contador sino el uso histórico como criterio
-de peso: **265 hechos borrados con su número de recuperaciones** (los top: 1.876x,
-1.626x, 992x, 635x — los cuatro, borrados). Eso es lo que sirve para decidir qué
-reingresar.
+**Corrección (medida después): el lote NO era material a rescatar.** La afirmación
+inicial —*"el valor real es el uso histórico para decidir qué reingresar"*— quedó
+**refutada por los datos**:
+
+```
+slots del prefetch (5 por turno, 5.936 bloques = 27.433 slots)
+  gastados en hechos VIVOS    :     33   ( 0.1%)
+  gastados en hechos BORRADOS : 27.400   (99.9%)
+     de esos, repetian algo que el SOUL.md YA dice: 6.102  (22.2%)
+  bloques con >=1 linea redundante con el SOUL: 3.695 / 5.936  (62%)
+```
+
+**De cada 5 slots de recuperación, 1,03 se iba en repetir lo que el SOUL.md ya
+garantiza cada turno, y prácticamente el resto citaba hechos ya inexistentes.** El
+mecanismo estaba roto: el prefetch elegía casi exclusivamente material muerto y
+desplazaba a los hechos vivos. Eso es *"rompían lo que hacemos ahora"*, y explica
+por qué los 33 hechos de hoy reciben 33 recuperaciones contra 27.400 inútiles.
+
+**Los 265 no se reingresan.** Y no hace falta que se reingresen: el cron construido
+**re-deriva** los hechos desde los resúmenes de compactación, que es la fuente viva.
+Lo que siga siendo cierto vuelve solo, ya redactado y sin el lastre. Rescatarlos en
+bloque habría restaurado justamente el ruido que rompía la inyección.
+
+**Lo único que merece revisión individual** (no rescate) son los hechos de *mundo*
+que no están en el SOUL y que el compresor no puede re-derivar por ser dato externo:
+Ley 175 de 2026, el formato MIME de invitaciones Teams/Outlook, el conteo de
+contactos de LinkedIn. Eso se re-investiga si vuelve a hacer falta — no se restaura
+de un backup.
 
