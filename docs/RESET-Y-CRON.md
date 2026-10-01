@@ -121,27 +121,64 @@ Cada uno se detectó corriendo de verdad, y varios habrían sido silenciosos:
    al reformularla. Este era el defecto más grave: habría dejado la memoria sin
    las reglas de conducta.
 
-2. **El redactor agregaba justificaciones.** Los hechos salían terminando en
+2. **La deduplicación era inalcanzable por diseño.** El umbral estaba sobre
+   `score` de `search()`, y `score = relevancia × trust × decay`: el trust acota
+   el score (~0.5 en hechos nuevos), así que **un umbral de 0.75 no se alcanza
+   nunca**. La primera corrida real generó **19 pares casi-duplicados**.
+
+   La causa de los duplicados, medida: **los resúmenes de compactación son
+   acumulativos** — el mismo hallazgo reaparece en bloques sucesivos (10% del
+   contenido está en más de un bloque). El mismo texto procesado dos veces da
+   **dos redacciones distintas** del mismo hecho.
+
+   Corregido con **dos señales**: similitud de texto (≥0.55) **o** JEV
+   *"¿afirman lo mismo?"* (≥0.5). La segunda es necesaria porque dos redacciones
+   que reordenan las palabras dan similitud ~0.50, por debajo de cualquier umbral
+   útil. Medido contra pares reales: JEV acierta los que el texto pierde
+   (0.78–0.94) y **no marca los que son distintos** (0.02–0.27).
+
+3. **El redactor agregaba justificaciones.** Los hechos salían terminando en
    *"ya fallé"*, *"ya causó errores"*. El hecho debe **afirmar** la regla, no
    narrar el incidente. Corregido con reglas explícitas y ejemplo.
 
-3. **`pendientes` marcaba como vistas huellas sin evaluar.** Si el tope de juicios
+4. **`pendientes` marcaba como vistas huellas sin evaluar.** Si el tope de juicios
    cortaba, esos candidatos **nunca se re-evaluaban**: se perdían. Ahora solo se
-   marcan las huellas que pasaron realmente por JEV.
+   marcan las huellas que pasaron realmente por JEV. Verificado: **60 candidatos
+   sin evaluar quedaron sin marcar**.
 
-4. **Cursor monotónico.** El primer diseño avanzaba `ultimo_msg_id`, y con topes
+5. **Cursor monotónico.** El primer diseño avanzaba `ultimo_msg_id`, y con topes
    salteaba bloques sin procesar. Reemplazado por una **lista de bloques
    completados**.
 
-5. **`search` no está en `MemoryStore`.** Vive en `FactRetriever`. Cargaba solo el
+6. **`search` no está en `MemoryStore`.** Vive en `FactRetriever`. Cargaba solo el
    store y moría con `AttributeError`.
 
-6. **`add_fact` devuelve un `int`,** no un dict (ya me había pasado antes).
+7. **`add_fact` devuelve un `int`,** no un dict.
 
-7. **Escritura silenciosa del cron.** Como `no_agent`, el stdout se entrega
+8. **Escritura silenciosa del cron.** Como `no_agent`, el stdout se entrega
    verbatim: el detalle de cada hecho habría llegado a Telegram. Ahora el detalle
    va al log y solo sale un resumen de una línea — y **nada** si no hubo nada
    (patrón watchdog).
+
+## Estado final
+
+```
+34 hechos (tras la fusión)  ->  32 (tras unificar 2 pares residuales mas)
+todos con hrr_vector y en FTS
+trust 0.51 - 0.71
+max similitud entre pares: 0.535 (ninguno es duplicado)
+```
+
+**Backups de la operación completa:**
+
+```
+facts-reset-20260930-195659/        pre-reset.db + los 265 hechos recuperados
+facts-fusion-20260930-202201/       fusion por texto (62 -> 39)
+facts-fusion-jev-20260930-202256/   fusion por JEV (39 -> 36)
+```
+
+Cada uno con su JSON de detalle (qué se conservó, qué se borró, por qué).
+
 
 ## Lo que NO está verificado
 
