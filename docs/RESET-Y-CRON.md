@@ -250,9 +250,33 @@ por qué los 33 hechos de hoy reciben 33 recuperaciones contra 27.400 inútiles.
 Lo que siga siendo cierto vuelve solo, ya redactado y sin el lastre. Rescatarlos en
 bloque habría restaurado justamente el ruido que rompía la inyección.
 
-**Lo único que merece revisión individual** (no rescate) son los hechos de *mundo*
-que no están en el SOUL y que el compresor no puede re-derivar por ser dato externo:
-Ley 175 de 2026, el formato MIME de invitaciones Teams/Outlook, el conteo de
-contactos de LinkedIn. Eso se re-investiga si vuelve a hacer falta — no se restaura
-de un backup.
+**Lo único que merecía revisión individual** eran los 4 hechos de mayor uso de la
+lista, aprobados uno por uno por Mauro. **Se recargaron con el procedimiento actual**
+(no se restauró el texto viejo), el 2026-09-30:
+
+```
+#339  trust 0.58  libreta propia de Andrea (contacts) aloja agentes; la de Mauro, humanos
+#340  trust 0.54  infraestructura local de Andrea, dirección en la casa de Mauro
+#341  trust 0.61  relaciones de vCards de la libreta de Mauro son implícitas con Mauro
+#342  trust 0.54  el plan de máquina con GPU sigue siendo plan, no estado
+```
+
+Método (`recargar_rescatados.py`): se le pasa al redactor del motor el **contexto
+verificado hoy**, no el texto viejo — así no arrastra la redacción anterior ni datos
+caducados. Luego el camino normal: JEV → redacción ≤275 chars → duplicado (texto +
+JEV) → contradicción (umbral 0.7) → `add_fact` + `update_fact(trust_delta)`. El trust
+sale de la curva `0.35+0.30×P`, **no del trust viejo** (que era 0.90–1.00 inflado).
+
+Qué se verificó antes de redactar, contra la fuente y no contra la memoria:
+
+- **Los agentes en `contacts`**: la libreta tiene 2 contactos — Mauro (`RELATIONSHIP:
+  FATHER`) y Andrea (`RELATIONSHIP: CHILD`, categoría `agents`). Confirmado en el
+  servidor.
+- **La dirección**: se tomó **literal del vCard de Mauro**, no de la memoria.
+- **`contacts_shared_by_mrosero`**: 386 contactos, todos humanos
+  (`family`/`friend`/`prospect`/`backlog`). Ningún agente.
+- **El plan de GPU**: verificado que **no se ejecutó** — sin GPU dedicada (solo Intel
+  HD Graphics 530 integrada, sin NVIDIA), host local (`systemd-detect-virt = none`).
+
+Efecto colateral medido: al pasar por `add_fact`, **las entidades subieron de 2 a 9**.
 
