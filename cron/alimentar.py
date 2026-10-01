@@ -99,6 +99,13 @@ PREGUNTAS = {
                              "afirma algo incompatible, lo niega, o lo vuelve obsoleto. "
                              "NO si solo agrega detalle o confirma lo mismo con otras "
                              "palabras."),
+    # Para deduplicar: mide SIGNIFICADO, no vocabulario. Dos redacciones del mismo
+    # hallazgo que reordenan las palabras dan similitud de texto ~0.50 (por debajo
+    # de cualquier umbral util), pero JEV las reconoce en 0.78-0.94 y no marca los
+    # hechos distintos (0.02-0.13).
+    "mismo_hecho": ("El HECHO B afirma LO MISMO que el HECHO A: son dos redacciones "
+                    "del mismo hallazgo, aunque cambien las palabras o el orden. NO si "
+                    "agregan informacion distinta, o si uno es un caso particular del otro."),
 }
 
 # Reglas ANOTADORAS. No descartan: etiquetan. Medido 70.2% precision / 60.1%
@@ -211,6 +218,10 @@ def redactar(candidato: str, api_key: str, seccion: str) -> str | None:
         "- El hecho AFIRMA la regla o el dato. NO narra el incidente ni agrega por "
         "que se aprendio. Prohibido terminar con 'ya fallo', 'ya costo un error', "
         "'sin eso se equivoca', o cualquier justificacion. Solo el hecho.\n"
+        "- Escribe el hecho COMPLETO, no su version minima. Si el hallazgo tiene el "
+        "dato principal y su consecuencia, ambos van. Prohibido empezar con 'Estoy "
+        "convencida', 'Considero que' o cualquier formula en primera persona que "
+        "hable de Andrea como sujeto de la frase: el sujeto es la regla, no Andrea.\n"
         "- No incluyas rutas, PIDs, hashes, versiones ni conteos que cambian pronto: "
         "si el hallazgo depende de uno, redacta lo esencial sin ese dato.\n\n"
         "Ejemplo de lo que NO se quiere:\n"
@@ -263,6 +274,40 @@ def marcas(t: str) -> list[str]:
 
 def huella(t: str) -> str:
     return hashlib.sha256(re.sub(r"\s+", " ", t.strip().lower())[:400].encode()).hexdigest()[:16]
+
+
+# Deduplicacion: umbral sobre SIMILITUD DE TEXTO, nunca sobre el `score` de
+# search() (score = relevancia * trust * decay, acotado por el trust: con hechos
+# nuevos ronda 0.5 y un umbral alto jamas se alcanza — asi se colaron 19 pares
+# duplicados en la primera corrida real).
+#
+# 0.55, calibrado contra los duplicados REALES de esa corrida: 19 pares con
+# similitud 0.70-0.97 eran el mismo hecho redactado dos veces. Con 0.70 quedaban
+# 10 sin fusionar; bajando a 0.55 entran todos. El limite conservador no es 0.55
+# sino el riesgo de fusionar dos hechos distintos: por debajo de ~0.55 la
+# similitud la produce el vocabulario compartido del dominio (todo aca habla de
+# plugins, memoria y filtros), no el mismo hecho.
+#
+# La CAUSA de los duplicados, medida: los resumenes de compactacion son
+# ACUMULATIVOS — el mismo hallazgo reaparece en bloques sucesivos (10% del
+# contenido esta en mas de un bloque). Sin dedupe, cada hecho se procesa 1.2
+# veces y produce dos redacciones distintas. Por eso ademas de este umbral, el
+# paso de candidatos ya deduplica por huella dentro de la corrida.
+UMBRAL_DUPLICADO = 0.55
+
+
+def _norm(t: str) -> str:
+    return re.sub(r"[^a-záéíóúñ0-9 ]", " ", t.lower())
+
+
+def _similitud(a: str, b: str) -> float:
+    """Jaccard de palabras y ratio de secuencia; el mayor de los dos. No depende
+    del trust: dos redacciones del mismo hecho dan alto aunque una sea de hoy."""
+    na, nb = set(_norm(a).split()), set(_norm(b).split())
+    jac = len(na & nb) / len(na | nb) if (na | nb) else 0.0
+    from difflib import SequenceMatcher
+    seq = SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+    return max(jac, seq)
 
 
 # ------------------------------------------------------------------ store
@@ -473,9 +518,41 @@ def main() -> int:
                 # NO se escribe sola: se deja propuesta para Mauro. La memoria no
                 # se reescribe por si misma una creencia sobre el mundo.
                 continue
-            if previos and previos[0].get("score", 0) > 0.75:
-                store.record_feedback(previos[0]["fact_id"], helpful=True)  # refuerza, no duplica
+            # DEDUPLICACION en dos señales, porque ninguna basta sola.
+            #
+            # 1) SIMILITUD DE TEXTO (>=0.55). No puede ser sobre `score`: score =
+            #    relevancia * trust * decay, acotado por el trust, asi que con
+            #    hechos nuevos ronda 0.5 y un umbral alto jamas se alcanza (asi se
+            #    colaron 19 pares duplicados en la primera corrida real).
+            #    El texto solo no alcanza: dos redacciones del mismo hecho que
+            #    reordenan las palabras dan 0.50, por debajo del umbral.
+            #
+            # 2) JEV "¿afirman lo mismo?" (>=0.5). Mide significado, no vocabulario,
+            #    asi que ve el mismo hecho reordenado. Medido contra pares reales:
+            #    acierta los que el texto pierde (0.78-0.94) y NO marca los que son
+            #    distintos (0.02-0.13).
+            #
+            # Se fusiona si CUALQUIERA de las dos lo dice. La proteccion real
+            # contra duplicados no es este filtro sino el progreso persistente: la
+            # huella del candidato ya evaluado evita reprocesar la misma fuente, y
+            # sin reproceso no hay segunda redaccion que fusionar.
+            mejor, mejor_sim, mejor_jev = None, 0.0, 0.0
+            for pv in previos:
+                s = _similitud(h["redactado"], pv["content"])
+                if s > mejor_sim:
+                    mejor, mejor_sim = pv, s
+            es_duplicado = mejor is not None and mejor_sim >= UMBRAL_DUPLICADO
+            if not es_duplicado and mejor is not None:
+                chk = jev_responder(
+                    {"hecho_a": mejor["content"][:2500], "hecho_b": h["redactado"][:2500]},
+                    {"mismo_hecho": PREGUNTAS["mismo_hecho"]}, k_openrouter)
+                mejor_jev = (chk or {}).get("mismo_hecho") or 0.0
+                es_duplicado = mejor_jev >= 0.5
+            if es_duplicado and mejor is not None:
+                store.record_feedback(mejor["fact_id"], helpful=True)  # refuerza, no duplica
                 fusionados += 1
+                log(f"    = duplicado de #{mejor['fact_id']} "
+                    f"(texto={mejor_sim:.2f} jev={mejor_jev:.2f}): refuerza en vez de duplicar")
                 continue
             fid = store.add_fact(h["redactado"], category="general")
             store.update_fact(fid, trust_delta=h["trust"] - 0.5)  # add_fact entra en default 0.5
