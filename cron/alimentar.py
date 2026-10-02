@@ -63,7 +63,14 @@ LOG = ESTADO / "alimentar.log"
 
 JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 JEV_MODEL = "~typesafe/jev-latest"
-REDACTOR = "deepseek/deepseek-v4.1-flash"
+# JEV se queda en OpenRouter a proposito: va al endpoint alpha/decisions, no es un
+# modelo de chat y no tiene equivalente en el gateway. Medido: 0.6 s por llamada.
+# El REDACTOR, en cambio, sale de la config (ver resolver_redactor()).
+
+# Fallback del redactor si no se puede leer la config. NO es el camino normal:
+# solo evita que el cron muera si config.yaml no se puede parsear.
+REDACTOR_FALLBACK = ("https://ollama.com/v1", "deepseek-v4.1-flash")
+
 
 # El redactor es un modelo de RAZONAMIENTO: el campo `reasoning` consume el
 # max_tokens. Con 400 y 1500 devolvia 0 chars. Con 3000 devuelve ~275.
@@ -215,7 +222,58 @@ def jev_responder(state: dict, questions: dict, api_key: str, intentos: int = 3)
     return None
 
 
-# ------------------------------------------------------------------ redaccion
+# ------------------------------------------------------------------ redactor
+_cache_redactor: tuple[str, str, str] | None = None
+
+
+def resolver_redactor() -> tuple[str, str, str]:
+    """Devuelve (base_url, modelo, env_var_de_la_clave) leidos de config.yaml.
+
+    El redactor NO se hardcodea: si Mauro cambia de modelo o de provider, el cron
+    lo sigue sin tocar el script. Antes era ``deepseek/deepseek-v4.1-flash`` fijo
+    contra openrouter.ai, y ese string ata el script a un enrutador: medido, el
+    MISMO modelo tarda 31 s por llamada por OpenRouter contra 1.3 s por el gateway
+    de ollama-cloud (24x), y el nombre alterno ``deepseek-v4-flash`` ya devuelve
+    HTTP 410 Gone ahi.
+
+    Se usa el resolver del core (``hermes_cli.providers.resolve_provider_full``)
+    en vez de armar la URL a mano: es la misma cadena que usa el arnes, asi que si
+    manana cambia el mapeo provider->base_url, esto lo sigue.
+
+    TRAMPA: hay que llamarlo SIN ``user_providers``. Si se le pasa el bloque
+    ``providers:`` de la config, ``ollama-cloud`` se resuelve por la rama
+    user-config y devuelve ``base_url`` VACIO (la config solo declara key_env, no
+    base_url). Sin ese argumento cae al registry del core y da la URL correcta.
+    """
+    global _cache_redactor
+    if _cache_redactor is not None:
+        return _cache_redactor
+
+    base, modelo, env_var = (*REDACTOR_FALLBACK, "OLLAMA_API_KEY")
+    try:
+        import yaml
+        cfg = yaml.safe_load((HERMES / "config.yaml").read_text()) or {}
+        m = cfg.get("model") or {}
+        modelo = m.get("default") or modelo
+        prov = m.get("provider") or ""
+        if prov:
+            # el import va adentro: si el core no esta en el path, no revienta
+            sys.path.insert(0, str(HERMES / "hermes-agent"))
+            from hermes_cli.providers import resolve_provider_full
+            pdef = resolve_provider_full(str(prov))
+            if pdef is not None and getattr(pdef, "base_url", ""):
+                base = pdef.base_url
+                envs = getattr(pdef, "api_key_env_vars", None) or ()
+                if envs:
+                    env_var = envs[0]
+    except Exception as e:  # noqa: BLE001 — nunca tumbar el cron por esto
+        log(f"  redactor: no pude leer la config ({str(e)[:70]}); uso el fallback")
+
+    _cache_redactor = (base, modelo, env_var)
+    log(f"  redactor: {modelo} via {base} (clave {env_var})")
+    return _cache_redactor
+
+
 def redactar(candidato: str, api_key: str, seccion: str) -> str | None:
     """Un hecho, <=275 chars, sin adornos. Se le da el criterio medido en la sesion
     ('un hecho es algo cuya ausencia ya costo un error')."""
@@ -241,10 +299,11 @@ def redactar(candidato: str, api_key: str, seccion: str) -> str | None:
         "resumenes de opinion no le sirven.'\n\n"
         "Hallazgo (seccion del resumen: " + seccion + "):\n" + candidato[:1800]
     )
-    body = {"model": REDACTOR, "max_tokens": MAX_TOKENS_REDACCION,
+    base_url, modelo, _ = resolver_redactor()
+    body = {"model": modelo, "max_tokens": MAX_TOKENS_REDACCION,
             "messages": [{"role": "user", "content": prompt}]}
     req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
+        base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     for i in range(2):
@@ -469,7 +528,14 @@ def main() -> int:
 
     k_openrouter = clave("OPENROUTER_API_KEY")
     if not k_openrouter:
-        log("  !! sin OPENROUTER_API_KEY: no puedo llamar a JEV ni al redactor. Fin.")
+        log("  !! sin OPENROUTER_API_KEY: no puedo llamar a JEV. Fin.")
+        return 1
+    # El redactor puede vivir en OTRO provider (el de la config). Su clave es
+    # distinta de la de JEV, asi que se resuelve aparte.
+    _base_red, _modelo_red, env_red = resolver_redactor()
+    k_redactor = clave(env_red)
+    if not k_redactor:
+        log(f"  !! sin {env_red}: no puedo redactar. Fin.")
         return 1
 
     # ---- compuerta JEV sobre el candidato (individual: ahi SI discrimina 0.04-0.81)
@@ -526,7 +592,7 @@ def main() -> int:
             log(f"  presupuesto de tiempo agotado en el hecho {i}/{len(aprobados)}: "
                 f"corta aca; {len(sin_procesar)} vuelven la proxima corrida")
             break
-        txt = redactar(c["texto"], k_openrouter, c["seccion"])
+        txt = redactar(c["texto"], k_redactor, c["seccion"])
         if not txt:
             continue
         p = c["jev"].get("hay_hecho") or 0.0
