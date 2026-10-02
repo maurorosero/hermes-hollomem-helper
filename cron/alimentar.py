@@ -146,6 +146,16 @@ def log(msg: str) -> None:
 
 VERBOSO = False
 DRY = False
+DEADLINE: float = float("inf")  # se fija en main(); inf = sin presupuesto
+
+
+def sin_tiempo(margen: float = 0.0) -> bool:
+    """True si el presupuesto de tiempo se agoto (o esta por agotarse).
+
+    El margen evita arrancar una llamada que ya no puede terminar dentro del
+    presupuesto: redactar tarda hasta 240s en el peor caso.
+    """
+    return time.monotonic() + margen >= DEADLINE
 
 
 def avisar(msg: str) -> None:
@@ -239,7 +249,10 @@ def redactar(candidato: str, api_key: str, seccion: str) -> str | None:
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     for i in range(2):
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            # 45s y no 120s: medido, el redactor responde en ~2s; 120s x 2
+            # intentos = 240s por hecho dejaba que un pico de red se comiera el
+            # presupuesto entero de la corrida (asi se colgo el 2026-10-01).
+            with urllib.request.urlopen(req, timeout=45) as r:
                 txt = (json.load(r)["choices"][0]["message"].get("content") or "").strip()
             if not txt:
                 return None
@@ -377,11 +390,19 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="detalle a consola")
     ap.add_argument("--max-candidatos", type=int, default=120)
     ap.add_argument("--max-juegos", type=int, default=60, help="tope de llamadas a JEV")
+    # Presupuesto propio de tiempo. Sin esto el unico guard era el timeout del
+    # wrapper, y la cuenta no cierra: 32 aprobados x 240s (timeout del redactor
+    # x 2 intentos) = 7680s >> 1500s. Una red lenta mataba la corrida y se
+    # perdian TODOS los hechos ya aprobados, porque la escritura era despues.
+    # Al agotarse, corta limpio: lo redactado se escribe y el resto espera.
+    ap.add_argument("--max-segundos", type=int, default=1200,
+                    help="presupuesto de tiempo; al agotarse corta y guarda lo hecho")
     args = ap.parse_args()
 
-    global VERBOSO, DRY
+    global VERBOSO, DRY, DEADLINE
     VERBOSO = args.verbose or not args.escribir
     DRY = not args.escribir
+    DEADLINE = time.monotonic() + args.max_segundos
 
     t0 = time.monotonic()
     log("=" * 68)
@@ -480,89 +501,115 @@ def main() -> int:
         con_marca = [c for c in rechazos if c["marcas"]]
         log(f"  discrepancia registrada: {len(con_marca)} rechazados que las reglas SI marcan")
 
-    # ---- redaccion
-    hechos = []
-    for c in aprobados:
+    # ---- redaccion + escritura, HECHO POR HECHO
+    # Antes eran dos fases: redactar los 32 y recien despues escribir. Con la red
+    # lenta, el wrapper mataba el proceso en redaccion y se perdian los 32 hechos
+    # ya aprobados (2026-10-01: 24 min colgado, 0 escritos). Ahora cada hecho se
+    # redacta y se escribe de inmediato: un corte deja escrito todo lo anterior.
+    store = retriever = None
+    if args.escribir:
+        store, retriever = cargar_store()
+
+    hechos = []            # solo para el historial y el resumen
+    escritos = fusionados = contradictorios = 0
+    cortado = False
+    sin_procesar: list[dict] = []
+
+    for i, c in enumerate(aprobados, 1):
+        if sin_tiempo(margen=240):
+            cortado = True
+            # Los que quedan NO se marcan como evaluados: si su huella entrara en
+            # `evaluadas`, el candidato jamas se re-evaluaria y el hecho se
+            # perderia para siempre. Es el mismo error que el bloque de progreso
+            # documenta para el tope de juicios.
+            sin_procesar = aprobados[i - 1:]
+            log(f"  presupuesto de tiempo agotado en el hecho {i}/{len(aprobados)}: "
+                f"corta aca; {len(sin_procesar)} vuelven la proxima corrida")
+            break
         txt = redactar(c["texto"], k_openrouter, c["seccion"])
         if not txt:
             continue
         p = c["jev"].get("hay_hecho") or 0.0
-        hechos.append({**c, "redactado": txt, "trust": round(min(0.65, 0.35 + 0.30 * p), 3)})
-    log(f"  redactados: {len(hechos)}")
+        h = {**c, "redactado": txt, "trust": round(min(0.65, 0.35 + 0.30 * p), 3)}
+        hechos.append(h)
+        if i % 5 == 0 or i == len(aprobados):
+            log(f"    redaccion ...{i}/{len(aprobados)}  ({len(hechos)} listos)")
 
-    # ---- escritura
-    escritos = fusionados = contradictorios = 0
+        if not args.escribir:
+            continue
+        assert store is not None and retriever is not None  # garantizado por args.escribir
+
+        # ---- ¿contradice algo existente? (JEV lo resuelve 8/8 donde contradict() da 0/4)
+        previos = retriever.search(h["redactado"], min_trust=0.3, limit=3)
+        contradijo = False
+        for pv in previos:
+            chk = jev_responder(
+                {"hecho_existente": pv["content"][:3000], "hallazgo_nuevo": h["redactado"][:3000]},
+                {"contradice_existente": PREGUNTAS["contradice_existente"]}, k_openrouter)
+            # Umbral 0.7: medido en esta sesion, JEV separa contradicciones
+            # reales en 0.88-0.97 y controles en 0.04-0.12, sin solapamiento.
+            # Con 0.5 se detenian pares COMPLEMENTARIOS (el .env no es secreto
+            # vs los secretos viven en Infisical: ambas ciertas). Detener de
+            # mas cuesta un hecho; detener de menos cuesta una creencia vieja.
+            if chk and (chk.get("contradice_existente") or 0) >= 0.7:
+                contradijo = True
+                contradictorios += 1
+                log(f"    CONTRADICE #{pv['fact_id']} ({chk['contradice_existente']:.2f}): "
+                    f"{h['redactado'][:60]}")
+                log(f"      existente: {pv['content'][:60]}")
+                break
+        if contradijo:
+            # NO se escribe sola: se deja propuesta para Mauro. La memoria no
+            # se reescribe por si misma una creencia sobre el mundo.
+            continue
+        # DEDUPLICACION en dos señales, porque ninguna basta sola.
+        #
+        # 1) SIMILITUD DE TEXTO (>=0.55). No puede ser sobre `score`: score =
+        #    relevancia * trust * decay, acotado por el trust, asi que con
+        #    hechos nuevos ronda 0.5 y un umbral alto jamas se alcanza (asi se
+        #    colaron 19 pares duplicados en la primera corrida real).
+        #    El texto solo no alcanza: dos redacciones del mismo hecho que
+        #    reordenan las palabras dan 0.50, por debajo del umbral.
+        #
+        # 2) JEV "¿afirman lo mismo?" (>=0.5). Mide significado, no vocabulario,
+        #    asi que ve el mismo hecho reordenado. Medido contra pares reales:
+        #    acierta los que el texto pierde (0.78-0.94) y NO marca los que son
+        #    distintos (0.02-0.13).
+        #
+        # Se fusiona si CUALQUIERA de las dos lo dice. La proteccion real
+        # contra duplicados no es este filtro sino el progreso persistente: la
+        # huella del candidato ya evaluado evita reprocesar la misma fuente, y
+        # sin reproceso no hay segunda redaccion que fusionar.
+        mejor, mejor_sim, mejor_jev = None, 0.0, 0.0
+        for pv in previos:
+            s = _similitud(h["redactado"], pv["content"])
+            if s > mejor_sim:
+                mejor, mejor_sim = pv, s
+        es_duplicado = mejor is not None and mejor_sim >= UMBRAL_DUPLICADO
+        if not es_duplicado and mejor is not None:
+            chk = jev_responder(
+                {"hecho_a": mejor["content"][:2500], "hecho_b": h["redactado"][:2500]},
+                {"mismo_hecho": PREGUNTAS["mismo_hecho"]}, k_openrouter)
+            mejor_jev = (chk or {}).get("mismo_hecho") or 0.0
+            es_duplicado = mejor_jev >= 0.5
+        if es_duplicado and mejor is not None:
+            store.record_feedback(mejor["fact_id"], helpful=True)  # refuerza, no duplica
+            fusionados += 1
+            log(f"    = duplicado de #{mejor['fact_id']} "
+                f"(texto={mejor_sim:.2f} jev={mejor_jev:.2f}): refuerza en vez de duplicar")
+            continue
+        fid = store.add_fact(h["redactado"], category="general")
+        store.update_fact(fid, trust_delta=h["trust"] - 0.5)  # add_fact entra en default 0.5
+        escritos += 1
+        log(f"    + #{fid} trust={h['trust']:.2f} [{','.join(h['marcas']) or 'sin marcas'}] "
+            f"{h['redactado'][:58]}")
+
     if args.escribir:
-        store, retriever = cargar_store()
-        for h in hechos:
-            # ¿contradice algo existente? (JEV lo resuelve 8/8 donde contradict() da 0/4)
-            previos = retriever.search(h["redactado"], min_trust=0.3, limit=3)
-            contradijo = False
-            for pv in previos:
-                chk = jev_responder(
-                    {"hecho_existente": pv["content"][:3000], "hallazgo_nuevo": h["redactado"][:3000]},
-                    {"contradice_existente": PREGUNTAS["contradice_existente"]}, k_openrouter)
-                # Umbral 0.7: medido en esta sesion, JEV separa contradicciones
-                # reales en 0.88-0.97 y controles en 0.04-0.12, sin solapamiento.
-                # Con 0.5 se detenian pares COMPLEMENTARIOS (el .env no es secreto
-                # vs los secretos viven en Infisical: ambas ciertas). Detener de
-                # mas cuesta un hecho; detener de menos cuesta una creencia vieja.
-                if chk and (chk.get("contradice_existente") or 0) >= 0.7:
-                    contradijo = True
-                    contradictorios += 1
-                    log(f"    CONTRADICE #{pv['fact_id']} ({chk['contradice_existente']:.2f}): "
-                        f"{h['redactado'][:60]}")
-                    log(f"      existente: {pv['content'][:60]}")
-                    break
-            if contradijo:
-                # NO se escribe sola: se deja propuesta para Mauro. La memoria no
-                # se reescribe por si misma una creencia sobre el mundo.
-                continue
-            # DEDUPLICACION en dos señales, porque ninguna basta sola.
-            #
-            # 1) SIMILITUD DE TEXTO (>=0.55). No puede ser sobre `score`: score =
-            #    relevancia * trust * decay, acotado por el trust, asi que con
-            #    hechos nuevos ronda 0.5 y un umbral alto jamas se alcanza (asi se
-            #    colaron 19 pares duplicados en la primera corrida real).
-            #    El texto solo no alcanza: dos redacciones del mismo hecho que
-            #    reordenan las palabras dan 0.50, por debajo del umbral.
-            #
-            # 2) JEV "¿afirman lo mismo?" (>=0.5). Mide significado, no vocabulario,
-            #    asi que ve el mismo hecho reordenado. Medido contra pares reales:
-            #    acierta los que el texto pierde (0.78-0.94) y NO marca los que son
-            #    distintos (0.02-0.13).
-            #
-            # Se fusiona si CUALQUIERA de las dos lo dice. La proteccion real
-            # contra duplicados no es este filtro sino el progreso persistente: la
-            # huella del candidato ya evaluado evita reprocesar la misma fuente, y
-            # sin reproceso no hay segunda redaccion que fusionar.
-            mejor, mejor_sim, mejor_jev = None, 0.0, 0.0
-            for pv in previos:
-                s = _similitud(h["redactado"], pv["content"])
-                if s > mejor_sim:
-                    mejor, mejor_sim = pv, s
-            es_duplicado = mejor is not None and mejor_sim >= UMBRAL_DUPLICADO
-            if not es_duplicado and mejor is not None:
-                chk = jev_responder(
-                    {"hecho_a": mejor["content"][:2500], "hecho_b": h["redactado"][:2500]},
-                    {"mismo_hecho": PREGUNTAS["mismo_hecho"]}, k_openrouter)
-                mejor_jev = (chk or {}).get("mismo_hecho") or 0.0
-                es_duplicado = mejor_jev >= 0.5
-            if es_duplicado and mejor is not None:
-                store.record_feedback(mejor["fact_id"], helpful=True)  # refuerza, no duplica
-                fusionados += 1
-                log(f"    = duplicado de #{mejor['fact_id']} "
-                    f"(texto={mejor_sim:.2f} jev={mejor_jev:.2f}): refuerza en vez de duplicar")
-                continue
-            fid = store.add_fact(h["redactado"], category="general")
-            store.update_fact(fid, trust_delta=h["trust"] - 0.5)  # add_fact entra en default 0.5
-            escritos += 1
-            log(f"    + #{fid} trust={h['trust']:.2f} [{','.join(h['marcas']) or 'sin marcas'}] "
-                f"{h['redactado'][:58]}")
         store._conn.close()
         log(f"  escritura: {escritos} nuevos, {fusionados} reforzados, "
             f"{contradictorios} detenidos por contradiccion")
     else:
+        log(f"  redactados: {len(hechos)}")
         log("  DRY-RUN — esto es lo que se escribiria:")
         for h in hechos[:25]:
             log(f"    trust={h['trust']:.2f} h={h['jev']['hay_hecho']:.2f} "
@@ -575,7 +622,13 @@ def main() -> int:
     # re-evaluan y se pierden para siempre. `procesadas` son solo las huellas
     # que REALMENTE pasaron por JEV; y un bloque entra en `bloques_completos`
     # solo si TODOS sus candidatos fueron evaluados (no solo vistos).
+    #
+    # `sin_procesar` (los aprobados que el deadline dejo sin redactar) sale de
+    # `evaluadas` por la misma razon: ya pasaron JEV, pero si su huella queda
+    # vista sin haberse escrito el hecho, se pierden para siempre. Al salir de
+    # `evaluadas`, la proxima corrida los vuelve a ver y JEV los re-juzga.
     evaluadas = huellas | {c["huella"] for c in aprobados + rechazos}
+    evaluadas -= {c["huella"] for c in sin_procesar}
     sin_evaluar = len(pendientes) - len(aprobados) - len(rechazos)
     completos = [f["id"] for f in filas
                  if all(huella(c["texto"]) in evaluadas for c in candidatos_de(f["content"]))]
@@ -590,6 +643,7 @@ def main() -> int:
         "modo": "escritura" if args.escribir else "dry-run",
         "bloques": len(filas), "candidatos": len(pendientes),
         "aprobados": len(aprobados), "redactados": len(hechos),
+        "cortado_por_tiempo": cortado,
         "watchdog": wd,
     })
     prog["historial"] = prog["historial"][-200:]
@@ -607,6 +661,9 @@ def main() -> int:
             partes.append(f"{fusionados} reforzado(s)")
         if contradictorios:
             partes.append(f"{contradictorios} detenido(s) por contradiccion")
+        if cortado:
+            partes.append(f"{len(sin_procesar)} sin redactar (se agoto el presupuesto "
+                          f"de tiempo; vuelven en la proxima corrida)")
         if not wd["ok"]:
             partes.append(f"ALERTA: el prefetch no inyecto hechos hoy "
                           f"({wd['turnos_con_hechos']}/{wd['turnos_hoy']} turnos)")
